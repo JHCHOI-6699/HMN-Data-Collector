@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <title>HMN Data Collector 1.5</title>
+  <title>HMN Data Collector 1.5.1</title>
   <style>
     :root { color-scheme: dark; --bg:#0b1020; --card:#151c2f; --line:#2a3550; --text:#f3f4f6; --muted:#a9b2c5; --ok:#34d399; --warn:#fbbf24; --bad:#fb7185; --accent:#60a5fa; }
     * { box-sizing:border-box; }
@@ -38,8 +38,8 @@
 </head>
 <body>
 <main>
-  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.5</small></h1>
-  <p class="sub">Bitget USDT Futures를 선택한 시간봉 그대로 수집합니다. 1H를 4H/1D로 합성하지 않습니다. Order Flow를 켜면 선택 시간봉과 같은 버킷으로 Active Buy/Sell을 병합합니다.</p>
+  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.5.1</small></h1>
+  <p class="sub">Bitget USDT Futures를 선택한 시간봉 그대로 수집합니다. API가 더 오래된 OHLCV를 반환하지 못하면 공식 Candlestick CSV를 추가해 같은 시간봉으로 자동 병합할 수 있습니다. Order Flow도 선택 시간봉과 같은 버킷으로 병합합니다.</p>
 
   <section class="card">
     <div class="grid">
@@ -93,6 +93,20 @@
   </section>
 
   <section class="card">
+    <h2>과거 OHLCV 보완 — API 시작점보다 더 오래된 기간</h2>
+    <p class="small">Bitget 과거 캔들 API가 요청 시작일까지 내려가지 못하면 수집된 최신 구간은 보존합니다. Bitget 공식 History data download의 <b>Futures Candlestick</b> CSV를 내려받아 아래에서 복수 선택하면 현재 선택 시간봉과 timestamp 기준으로 병합·중복제거·재검증합니다.</p>
+    <div>
+      <label for="candleFiles">Bitget Futures Candlestick CSV (복수 선택 가능)</label>
+      <input id="candleFiles" type="file" accept=".csv,text/csv" multiple />
+    </div>
+    <div class="actions">
+      <button id="candleImportBtn">과거 OHLCV CSV 병합·재검증</button>
+      <button id="candleClearBtn">가져온 OHLCV 초기화</button>
+    </div>
+    <p id="candleStatus" class="status"></p>
+  </section>
+
+  <section class="card">
     <h2>과거 Order Flow 보완 — 필요한 경우에만</h2>
     <p class="small">OHLCV는 선택 기간 전체를 API 페이지네이션으로 수집할 수 있습니다. 반면 Active Buy/Sell 공개 API는 과거 start/end 페이지네이션이 없으므로, 오래된 전체기간 Order Flow가 필요한 경우 Bitget 공식 Futures Transaction History CSV를 한 번 가져와야 합니다. 가져온 체결은 <b>현재 선택한 시간봉</b>으로 직접 집계하며 1H를 중간 Master로 만들지 않습니다.</p>
     <div>
@@ -111,8 +125,11 @@
 "use strict";
 
 const API = "https://api.bitget.com/api/v2/mix/market";
+const API_V3 = "https://api.bitget.com/api/v3/market";
 const FLOW_API = "https://api.bitget.com/api/v3/market/futures-active-buy-sell";
 const PRODUCT = "usdt-futures";
+const CATEGORY = "USDT-FUTURES";
+const V3_HISTORY_INTERVALS = new Set(["1m","3m","5m","15m","30m","1H","4H","6H","12H","1D"]);
 const INTERVAL_MS = {
   "1m":60000,"3m":180000,"5m":300000,"15m":900000,"30m":1800000,
   "1H":3600000,"4H":14400000,"6H":21600000,"12H":43200000,
@@ -127,6 +144,8 @@ let collectedMeta = {symbol:"",g:"",clean:false,bounds:null};
 let aborter = null;
 let flowMap = new Map();
 let flowMeta = {symbol:"",g:"",source:""};
+let candleMap = new Map();
+let apiFloorMs = null;
 
 function iso(ms){ return new Date(ms).toISOString(); }
 function ymd(ms){ return iso(ms).slice(0,10); }
@@ -134,9 +153,10 @@ function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function cleanSymbol(v){ return v.trim().toUpperCase().replace(/[^A-Z0-9]/g,""); }
 function setStatus(msg, cls=""){ $("status").className="status "+cls; $("status").textContent=msg; }
 function setFlowStatus(msg, cls=""){ $("flowStatus").className="status "+cls; $("flowStatus").textContent=msg; }
+function setCandleStatus(msg, cls=""){ $("candleStatus").className="status "+cls; $("candleStatus").textContent=msg; }
 function setBusy(on){
   $("collectBtn").disabled=on; $("oldestBtn").disabled=on; $("cancelBtn").disabled=!on;
-  $("tradeImportBtn").disabled=on; $("progress").hidden=!on; if(!on) $("progress").value=0;
+  $("tradeImportBtn").disabled=on; $("candleImportBtn").disabled=on; $("candleClearBtn").disabled=on; $("progress").hidden=!on; if(!on) $("progress").value=0;
 }
 function isBitgetDaily(g){ return g==="1D"; }
 function dailyOffsetMs(g){ return isBitgetDaily(g) ? -8*3600000 : 0; }
@@ -183,9 +203,24 @@ async function api(path, params, retries=4){
 function parseRows(raw){
   return raw.map(r=>({timestamp:Number(r[0]),open:Number(r[1]),high:Number(r[2]),low:Number(r[3]),close:Number(r[4]),volume_base:Number(r[5]),volume_quote:Number(r[6])})).filter(r=>Number.isFinite(r.timestamp));
 }
-async function fetchHistoryPage(symbol,g,endTime){
-  const raw=await api("/history-candles",{symbol,productType:PRODUCT,granularity:g,endTime:String(Math.floor(endTime)),limit:"100"});
+async function fetchHistoryPageV2(symbol,g,endTime){
+  const raw=await api("/history-candles",{symbol,productType:PRODUCT,granularity:g,endTime:String(Math.floor(endTime)),limit:"200"});
   return parseRows(raw).sort((a,b)=>a.timestamp-b.timestamp);
+}
+async function fetchHistoryPageV3(symbol,g,endTime){
+  if(!V3_HISTORY_INTERVALS.has(g)) return [];
+  const url=API_V3+"/history-candles?"+new URLSearchParams({category:CATEGORY,symbol,interval:g,endTime:String(Math.floor(endTime)),type:"market",limit:"100"});
+  const res=await fetch(url,{signal:aborter?.signal,cache:"no-store"});
+  if(!res.ok) throw new Error("V3 HTTP "+res.status);
+  const j=await res.json(); if(j.code!=="00000") throw new Error((j.msg||"Bitget V3 오류")+" ("+j.code+")");
+  return parseRows(j.data||[]).sort((a,b)=>a.timestamp-b.timestamp);
+}
+async function fetchHistoryPage(symbol,g,endTime){ return fetchHistoryPageV2(symbol,g,endTime); }
+async function fetchOlderFallback(symbol,g,oldest){
+  const target=oldest-1;
+  try{ const p=await fetchHistoryPageV2(symbol,g,target); if(p.length&&p[0].timestamp<oldest) return {page:p,source:"v2"}; }catch(_e){}
+  try{ const p=await fetchHistoryPageV3(symbol,g,target); if(p.length&&p[0].timestamp<oldest) return {page:p,source:"v3"}; }catch(_e){}
+  return {page:[],source:"none"};
 }
 async function hasDataBefore(symbol,g,t){ return (await fetchHistoryPage(symbol,g,t)).length>0; }
 async function findOldest(){
@@ -236,10 +271,68 @@ function expectedCount(bounds,interval,g){
   return lastStart<bounds.start?0:Math.floor((lastStart-bounds.start)/interval)+1;
 }
 function renderReport(rows,issues,bounds,interval,g,repair){
-  const expected=expectedCount(bounds,interval,g), ok=issues.duplicates===0&&issues.missingBars===0&&issues.ohlc===0&&issues.invalid===0&&issues.negativeVolume===0;
-  const items=[["수집 봉",rows.length.toLocaleString()+"개"],["첫 봉",rows.length?iso(rows[0].timestamp):"-"],["마지막 확정 봉",rows.length?iso(rows.at(-1).timestamp):"-"],["예상/실제",expected.toLocaleString()+" / "+rows.length.toLocaleString()],["자동 복구",repair.repaired.toLocaleString()+"개"],["중복",issues.duplicates+"개"],["남은 누락",issues.missingBars+"개"],["OHLC 오류",issues.ohlc+"개"]];
+  const expected=expectedCount(bounds,interval,g);
+  const complete=rows.length===expected && (!rows.length || rows[0].timestamp<=bounds.start) ;
+  const ok=complete&&issues.duplicates===0&&issues.missingBars===0&&issues.ohlc===0&&issues.invalid===0&&issues.negativeVolume===0;
+  const items=[["수집 봉",rows.length.toLocaleString()+"개"],["첫 봉",rows.length?iso(rows[0].timestamp):"-"],["마지막 확정 봉",rows.length?iso(rows.at(-1).timestamp):"-"],["예상/실제",expected.toLocaleString()+" / "+rows.length.toLocaleString()],["기간 완전성",complete?"완전":"과거 구간 부족"],["자동 복구",repair.repaired.toLocaleString()+"개"],["중복",issues.duplicates+"개"],["남은 내부 누락",issues.missingBars+"개"],["OHLC 오류",issues.ohlc+"개"]];
   $("report").innerHTML=items.map(([a,b])=>`<div class="metric"><span class="small">${a}</span><b>${b}</b></div>`).join(""); return ok;
 }
+function rebuildCollectedFromCandleMap(){
+  const g=$("granularity").value, interval=INTERVAL_MS[g], bounds=dateBounds(g), now=Date.now();
+  collected=[...candleMap.values()].filter(r=>r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive&&r.timestamp+interval<=now).sort((a,b)=>a.timestamp-b.timestamp);
+  const issues=validate(collected,interval), repair={repaired:0,attempted:0,unresolved:[]};
+  const clean=renderReport(collected,issues,bounds,interval,g,repair);
+  collectedMeta={symbol:cleanSymbol($("symbol").value),g,clean,bounds};
+  renderFlowReport(); updateDownloadAvailability();
+  return {clean,issues,bounds,interval};
+}
+
+function parseCandleCsv(text){
+  const lines=text.replace(/^\uFEFF/,"").split(/\r?\n/).filter(x=>x.trim()); if(!lines.length)return[];
+  const first=splitCsvLine(lines[0]);
+  const hasHeader=first.some(v=>/[A-Za-z_]/.test(String(v)));
+  let start=0, ti=0,oi=1,hi=2,li=3,ci=4,vi=5,qi=6;
+  if(hasHeader){
+    const h=first; start=1;
+    ti=pickIndex(h,["timestamp","ts","time","opentime","open_time","datetime","datetimeutc","datetime_utc"]);
+    oi=pickIndex(h,["open","openprice"]); hi=pickIndex(h,["high","highprice"]); li=pickIndex(h,["low","lowprice"]); ci=pickIndex(h,["close","closeprice"]);
+    vi=pickIndex(h,["volumebase","volume_base","basevolume","volume","vol"]); qi=pickIndex(h,["volumequote","volume_quote","quotevolume","turnover","quotevol"]);
+    if([ti,oi,hi,li,ci,vi].some(i=>i<0)) throw new Error(`Candlestick 필수 열을 찾지 못했습니다. 실제: ${h.join(" | ")}`);
+  }
+  const rows=[];
+  for(let i=start;i<lines.length;i++){
+    const a=splitCsvLine(lines[i]); let raw=String(a[ti]??"").trim(),ts=Number(raw); if(!Number.isFinite(ts))ts=Date.parse(raw); if(Number.isFinite(ts)&&ts<1e12)ts*=1000;
+    const r={timestamp:ts,open:Number(a[oi]),high:Number(a[hi]),low:Number(a[li]),close:Number(a[ci]),volume_base:Number(a[vi]),volume_quote:qi>=0?Number(a[qi]):0};
+    if([r.timestamp,r.open,r.high,r.low,r.close,r.volume_base].every(Number.isFinite)) rows.push(r);
+  }
+  return rows;
+}
+
+async function importCandleFiles(){
+  const files=[...($("candleFiles").files||[])]; if(!files.length)return setCandleStatus("Futures Candlestick CSV 파일을 선택하세요.","warn");
+  try{
+    setBusy(true); let added=0,parsed=0; const g=$("granularity").value, interval=INTERVAL_MS[g], bounds=dateBounds(g);
+    for(let k=0;k<files.length;k++){
+      const rows=parseCandleCsv(await files[k].text()); parsed+=rows.length;
+      for(const r of rows){
+        if(r.timestamp<bounds.start||r.timestamp>=bounds.endExclusive) continue;
+        if(Math.abs(bucketTimestamp(r.timestamp,g)-r.timestamp)>1) continue;
+        if(!candleMap.has(r.timestamp)) added++; candleMap.set(r.timestamp,r);
+      }
+      setCandleStatus(`처리 ${k+1}/${files.length} · 파싱 ${parsed.toLocaleString()}봉 · 신규 ${added.toLocaleString()}봉`);
+    }
+    const x=rebuildCollectedFromCandleMap();
+    if(x.clean){
+      setCandleStatus(`OHLCV 병합 완료: ${collected.length.toLocaleString()}봉 · 요청기간 완전성 통과`,"ok");
+      if($("includeFlow").checked){
+        const fr=await collectDirectFlow(cleanSymbol($("symbol").value),g,bounds); renderFlowReport(); updateDownloadAvailability();
+        const cov=flowCoverage(); setStatus(`OHLCV 전체기간 완성 · ${fr.message} · Order Flow ${cov.matched.toLocaleString()}/${collected.length.toLocaleString()} 매칭`,cov.complete?"ok":"warn");
+      }
+    }else setCandleStatus(`병합 후에도 요청기간이 완전하지 않습니다. Bitget 과거 Candlestick 파일을 더 추가하세요. 현재 ${collected.length.toLocaleString()}봉`,"warn");
+  }catch(e){ setCandleStatus("OHLCV CSV 처리 실패: "+e.message,"bad"); } finally{ setBusy(false); }
+}
+function clearImportedCandles(){ candleMap=new Map(collected.map(r=>[r.timestamp,r])); setCandleStatus("현재 메모리의 OHLCV만 유지합니다.","warn"); }
+
 function finalizeFlowMap(){
   const arr=[...flowMap.values()].sort((a,b)=>a.timestamp-b.timestamp); let cvd=0;
   for(const r of arr){ r.total_active_base=r.taker_buy_base+r.taker_sell_base; r.delta_base=r.taker_buy_base-r.taker_sell_base; r.buy_ratio=r.total_active_base>0?r.taker_buy_base/r.total_active_base:null; r.sell_ratio=r.total_active_base>0?r.taker_sell_base/r.total_active_base:null; cvd+=r.delta_base; r.cvd=cvd; }
@@ -278,17 +371,35 @@ async function collectDirectFlow(symbol,g,bounds){
 async function collect(){
   const symbol=cleanSymbol($("symbol").value), g=$("granularity").value, interval=INTERVAL_MS[g]; if(!symbol)return setStatus("종목을 입력하세요.","bad");
   let bounds; try{bounds=dateBounds(g);}catch(e){return setStatus(e.message,"bad");}
-  aborter=new AbortController();setBusy(true);collected=[];flowMap=new Map();flowMeta={symbol,g,source:""};collectedMeta={symbol:"",g:"",clean:false,bounds:null};$("downloadBtn").disabled=true;$("report").innerHTML="";$("flowReport").innerHTML="";
+  aborter=new AbortController();setBusy(true);collected=[];candleMap=new Map();apiFloorMs=null;flowMap=new Map();flowMeta={symbol,g,source:""};collectedMeta={symbol:"",g:"",clean:false,bounds:null};$("downloadBtn").disabled=true;$("report").innerHTML="";$("flowReport").innerHTML="";setCandleStatus("");
   try{
     let cursor=bounds.endExclusive,map=new Map(),calls=0,previousOldest=Infinity; const estimated=Math.max(1,Math.ceil((bounds.endExclusive-bounds.start)/(interval*95)));
     while(cursor>bounds.start){
       const page=await fetchHistoryPage(symbol,g,cursor);calls++;if(!page.length)break;for(const r of page)if(r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive)map.set(r.timestamp,r);
       const oldest=page[0].timestamp;$("progress").value=Math.min(85,Math.round(calls/estimated*85));setStatus(`OHLCV 수집 중… API ${calls}회\n확보 ${map.size.toLocaleString()}봉\n위치 ${iso(oldest)}`);
-      if(oldest<=bounds.start)break;if(oldest>=previousOldest)throw new Error("페이지 탐색이 더 이상 과거로 진행되지 않습니다.");previousOldest=oldest;cursor=oldest+interval;await sleep(70);
+      if(oldest<=bounds.start)break;
+      if(oldest>=previousOldest){
+        const fb=await fetchOlderFallback(symbol,g,previousOldest);
+        if(fb.page.length&&fb.page[0].timestamp<previousOldest){
+          for(const r of fb.page)if(r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive)map.set(r.timestamp,r);
+          previousOldest=fb.page[0].timestamp; cursor=previousOldest-1; setStatus(`OHLCV ${fb.source.toUpperCase()} fallback으로 계속 수집…\n확보 ${map.size.toLocaleString()}봉\n위치 ${iso(previousOldest)}`); await sleep(70); continue;
+        }
+        apiFloorMs=previousOldest; break;
+      }
+      previousOldest=oldest;cursor=oldest-1;await sleep(70);
     }
+    candleMap=map;
     const repair=await repairMissing(symbol,g,interval,map,bounds), now=Date.now();
     collected=[...map.values()].filter(r=>r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive&&r.timestamp+interval<=now).sort((a,b)=>a.timestamp-b.timestamp); if(!collected.length)throw new Error("선택 기간에서 확정 봉을 찾지 못했습니다.");
-    const issues=validate(collected,interval), clean=renderReport(collected,issues,bounds,interval,g,repair); collectedMeta={symbol,g,clean,bounds}; if(!clean)throw new Error("OHLCV 검증 실패: 남은 누락 또는 오류가 있습니다.");
+    candleMap=new Map(collected.map(r=>[r.timestamp,r]));
+    const issues=validate(collected,interval), clean=renderReport(collected,issues,bounds,interval,g,repair); collectedMeta={symbol,g,clean,bounds};
+    if(!clean){
+      updateDownloadAvailability();
+      const first=collected[0]?.timestamp;
+      setStatus(`OHLCV API 구간 수집 완료지만 요청 시작일까지 도달하지 못했습니다.\n현재 첫 봉: ${first?iso(first):"-"}${apiFloorMs?`\nAPI 반복/바닥 감지: ${iso(apiFloorMs)}`:""}\n아래 '과거 OHLCV 보완'에서 Bitget Futures Candlestick CSV를 추가하세요.`,"warn");
+      setCandleStatus("Bitget 공식 History data download → Futures → Candlestick에서 부족한 과거 구간 파일을 받아 추가하세요.","warn");
+      return;
+    }
     let flowMsg="Order Flow 제외";
     if($("includeFlow").checked){
       setStatus(`OHLCV ${collected.length.toLocaleString()}봉 검증 통과\n선택 시간봉 ${LABEL[g]} Order Flow 조회 중…`);
@@ -354,6 +465,8 @@ $("collectBtn").addEventListener("click",collect);
 $("downloadBtn").addEventListener("click",download);
 $("cancelBtn").addEventListener("click",()=>aborter?.abort());
 $("tradeImportBtn").addEventListener("click",importTradeFiles);
+$("candleImportBtn").addEventListener("click",importCandleFiles);
+$("candleClearBtn").addEventListener("click",clearImportedCandles);
 $("flowOnlyDownloadBtn").addEventListener("click",downloadFlowOnly);
 initDates();
 </script>
