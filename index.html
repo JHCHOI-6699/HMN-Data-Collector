@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <title>HMN Data Collector 1.7.0 - OHLCV Only</title>
+  <title>HMN Data Collector 1.7.1 - OHLCV Only</title>
   <style>
     :root { color-scheme:dark; --bg:#0b1020; --card:#151c2f; --line:#2a3550; --text:#f3f4f6; --muted:#a9b2c5; --ok:#34d399; --warn:#fbbf24; --bad:#fb7185; --accent:#60a5fa; }
     * { box-sizing:border-box; }
@@ -36,7 +36,7 @@
 </head>
 <body>
 <main>
-  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.7.0 · OHLCV Only</small></h1>
+  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.7.1 · OHLCV Only</small></h1>
   <p class="sub">Order Flow 기능을 제거한 OHLCV 전용 버전입니다. 선택 기간 전체를 Bitget Historical Candles API로 수집하고, 중복·누락·OHLC 오류를 검증한 뒤 검증 통과 데이터만 CSV로 다운로드합니다.</p>
 
   <section class="card">
@@ -65,11 +65,17 @@
       </div>
     </div>
     <p class="note">기본값은 BTCUSDT 2019-07-10 ~ 2026-07-31입니다. 날짜는 필요하면 변경할 수 있습니다. 1D는 Bitget UTC+8 일봉 경계를 사용합니다.</p>
+    <div class="actions">
+      <button id="rangeBtn">다운로드 가능한 전체기간 확인</button>
+      <button id="applyRangeBtn" disabled>확인된 전체기간 적용</button>
+    </div>
+    <progress id="rangeProgress" max="100" value="0" hidden></progress>
+    <p id="rangeStatus" class="status"></p>
   </section>
 
   <section class="card">
     <h2>2. 전체기간 OHLCV 수집·검증</h2>
-    <p class="small">Bitget Historical Candles API를 과거 방향으로 반복 조회합니다. API가 요청 시작일까지 내려가지 못하면 이미 받은 데이터는 보존하고, 아래 Candlestick CSV 보완 기능으로 부족 구간만 추가할 수 있습니다.</p>
+    <p class="small">Bitget Historical Candles API를 과거 방향으로 반복 조회합니다. 확인된 Bitget 최초 제공 봉보다 앞선 요청 구간은 가짜 누락으로 만들지 않고 API 제공 전 구간으로 분리합니다. 실제 제공범위 안의 중복·누락·OHLC 오류가 모두 0이면 다운로드할 수 있습니다.</p>
     <div class="actions">
       <button id="collectBtn" class="primary">OHLCV 전체 수집·검증</button>
       <button id="cancelBtn" disabled>작업 중지</button>
@@ -98,7 +104,7 @@
   <section class="card">
     <h2>CSV 형식</h2>
     <p class="small"><code>timestamp, datetime_utc, open, high, low, close, volume_base, volume_quote</code></p>
-    <p class="small">CSV 다운로드는 요청기간의 예상 봉 수가 모두 존재하고, 중복·내부 누락·OHLC·숫자·음수 거래량 오류가 모두 0일 때만 활성화됩니다.</p>
+    <p class="small">CSV 다운로드는 Bitget의 확인된 최초 제공 봉부터 요청 종료일까지 예상 봉 수가 모두 존재하고, 중복·내부 누락·OHLC·숫자·음수 거래량 오류가 모두 0일 때만 활성화됩니다. 최초 제공 봉보다 앞선 시간은 데이터 누락으로 간주하지 않습니다.</p>
   </section>
 </main>
 
@@ -109,7 +115,7 @@ const API = "https://api.bitget.com/api/v2/mix/market";
 const API_V3 = "https://api.bitget.com/api/v3/market";
 const PRODUCT = "usdt-futures";
 const CATEGORY = "USDT-FUTURES";
-const VERSION = "1.7.0";
+const VERSION = "1.7.1";
 const INTERVAL_MS = {"1H":3600000,"4H":14400000,"1D":86400000};
 const LABEL = {"1H":"1H","4H":"4H","1D":"1D"};
 const V3_HISTORY_INTERVALS = new Set(["1H","4H","1D"]);
@@ -120,6 +126,8 @@ let candleMap = new Map();
 let collected = [];
 let collectedMeta = {clean:false,symbol:"",g:"",bounds:null};
 let apiFloorMs = null;
+let apiFloorConfirmed = false;
+let availableRange = {symbol:"",g:"",floor:null,last:null,confirmed:false};
 
 function iso(ms){ return new Date(ms).toISOString(); }
 function ymd(ms){ return iso(ms).slice(0,10); }
@@ -148,10 +156,19 @@ function getOhlcvBounds(){
   return {start,endExclusive};
 }
 function setBusy(on){
-  for(const id of ["collectBtn","candleImportBtn","clearOhlcvBtn"]){ if($(id))$(id).disabled=on; }
+  for(const id of ["collectBtn","candleImportBtn","clearOhlcvBtn","rangeBtn","applyRangeBtn"]){ if($(id))$(id).disabled=on || (id==="applyRangeBtn" && !availableRange.confirmed); }
   $("cancelBtn").disabled=!on;
   $("progress").hidden=!on;
   if(!on)$("progress").value=0;
+}
+function setRangeBusy(on){
+  $("rangeBtn").disabled=on;
+  $("applyRangeBtn").disabled=on || !availableRange.confirmed;
+  $("collectBtn").disabled=on;
+  $("candleImportBtn").disabled=on;
+  $("clearOhlcvBtn").disabled=on;
+  $("rangeProgress").hidden=!on;
+  if(!on)$("rangeProgress").value=0;
 }
 
 async function api(path,params,retries=4){
@@ -189,16 +206,104 @@ async function fetchHistoryPageV3(symbol,g,endTime){
 }
 async function fetchOlderFallback(symbol,g,oldest){
   const target=oldest-1;
+  let successfulResponses=0;
+  let lastError=null;
   try{
     const p=await fetchHistoryPageV2(symbol,g,target);
-    if(p.length&&p[0].timestamp<oldest)return{page:p,source:"v2"};
-  }catch(_e){}
+    successfulResponses++;
+    if(p.length&&p[0].timestamp<oldest)return{page:p,source:"v2",confirmedFloor:false,successfulResponses};
+  }catch(e){lastError=e;}
   try{
     const p=await fetchHistoryPageV3(symbol,g,target);
-    if(p.length&&p[0].timestamp<oldest)return{page:p,source:"v3"};
-  }catch(_e){}
-  return {page:[],source:"none"};
+    successfulResponses++;
+    if(p.length&&p[0].timestamp<oldest)return{page:p,source:"v3",confirmedFloor:false,successfulResponses};
+  }catch(e){lastError=e;}
+  if(!successfulResponses && lastError)throw lastError;
+  return {page:[],source:"none",confirmedFloor:successfulResponses>0,successfulResponses};
 }
+async function findAvailableRange(){
+  const symbol=cleanSymbol($("symbol").value),g=$("granularity").value,interval=INTERVAL_MS[g];
+  if(!symbol)return setText("rangeStatus","종목을 입력하세요.","bad");
+  aborter=new AbortController();
+  setRangeBusy(true);
+  availableRange={symbol,g,floor:null,last:null,confirmed:false};
+  $("applyRangeBtn").disabled=true;
+  try{
+    const endCursor=Date.now()+interval*2;
+    let page=await fetchHistoryPageV2(symbol,g,endCursor);
+    if(!page.length)throw new Error("Bitget에서 현재 사용 가능한 캔들을 찾지 못했습니다.");
+    const confirmedNow=Date.now();
+    const confirmedRows=page.filter(r=>r.timestamp+interval<=confirmedNow);
+    if(!confirmedRows.length)throw new Error("마감된 최신 봉을 찾지 못했습니다.");
+    const fullDateRows=confirmedRows.filter(r=>displayDateForTimestamp(r.timestamp+interval,g)!==displayDateForTimestamp(r.timestamp,g));
+    if(!fullDateRows.length)throw new Error("완전히 마감된 최신 날짜를 찾지 못했습니다.");
+    let newest=fullDateRows.at(-1).timestamp;
+    let oldest=page[0].timestamp;
+    let previousOldest=Infinity,calls=1;
+    setText("rangeStatus",`다운로드 가능기간 탐색 중…\n현재 최신 봉 ${iso(newest)}\n현재 가장 과거 ${iso(oldest)}`);
+    while(calls<1200){
+      if(oldest>=previousOldest){
+        const fb=await fetchOlderFallback(symbol,g,previousOldest);
+        calls++;
+        if(fb.page.length&&fb.page[0].timestamp<previousOldest){
+          page=fb.page; oldest=page[0].timestamp; previousOldest=oldest;
+          $("rangeProgress").value=Math.min(98,5+Math.round(calls/400*90));
+          continue;
+        }
+        if(fb.confirmedFloor){
+          oldest=previousOldest;
+          availableRange={symbol,g,floor:oldest,last:newest,confirmed:true};
+          break;
+        }
+        throw new Error("과거 데이터 시작점을 확정하지 못했습니다.");
+      }
+      previousOldest=oldest;
+      const next=await fetchHistoryPageV2(symbol,g,oldest-1);
+      calls++;
+      if(!next.length){
+        const fb=await fetchOlderFallback(symbol,g,oldest);
+        calls++;
+        if(fb.page.length&&fb.page[0].timestamp<oldest){page=fb.page;oldest=page[0].timestamp;}
+        else if(fb.confirmedFloor){availableRange={symbol,g,floor:oldest,last:newest,confirmed:true};break;}
+        else throw new Error("과거 데이터 시작점을 확정하지 못했습니다.");
+      }else{
+        const nextOldest=next[0].timestamp;
+        if(nextOldest>=oldest){
+          const fb=await fetchOlderFallback(symbol,g,oldest);
+          calls++;
+          if(fb.page.length&&fb.page[0].timestamp<oldest){page=fb.page;oldest=page[0].timestamp;}
+          else if(fb.confirmedFloor){availableRange={symbol,g,floor:oldest,last:newest,confirmed:true};break;}
+          else throw new Error("과거 데이터 시작점을 확정하지 못했습니다.");
+        }else{page=next;oldest=nextOldest;}
+      }
+      $("rangeProgress").value=Math.min(98,5+Math.round(calls/400*90));
+      if(calls%5===0)setText("rangeStatus",`다운로드 가능기간 탐색 중… API ${calls}회\n최신 봉 ${iso(newest)}\n현재 가장 과거 ${iso(oldest)}`);
+      await sleep(55);
+    }
+    if(!availableRange.confirmed)throw new Error("탐색 횟수 한도 안에서 시작점을 확정하지 못했습니다.");
+    apiFloorMs=availableRange.floor;
+    apiFloorConfirmed=true;
+    $("rangeProgress").value=100;
+    $("applyRangeBtn").disabled=false;
+    const beforeMidnight=availableRange.floor-selectedDateToUtc(displayDateForTimestamp(availableRange.floor,g),g);
+    setText("rangeStatus",`확인 완료\n최초 제공 봉: ${iso(availableRange.floor)}\n마지막 완전일 봉: ${iso(availableRange.last)}${beforeMidnight>0?`\n최초 날짜의 앞 ${Math.round(beforeMidnight/interval)}개 봉은 Bitget 제공 전 구간입니다.`:""}\n'확인된 전체기간 적용'을 누르면 날짜 입력값에 반영됩니다.`,"ok");
+  }catch(e){
+    setText("rangeStatus",e.name==="AbortError"?"기간 탐색을 중지했습니다.":`전체기간 확인 실패: ${e.message}`,"bad");
+  }finally{
+    setRangeBusy(false);
+    aborter=null;
+  }
+}
+function applyAvailableRange(){
+  if(!availableRange.confirmed)return;
+  $("ohlcvStart").value=displayDateForTimestamp(availableRange.floor,availableRange.g);
+  $("ohlcvEnd").value=displayDateForTimestamp(availableRange.last,availableRange.g);
+  clearOhlcv(true);
+  apiFloorMs=availableRange.floor;
+  apiFloorConfirmed=true;
+  setText("status",`확인된 Bitget 제공범위를 적용했습니다.\n실제 최초 봉 ${iso(availableRange.floor)}부터 검증합니다.`,"ok");
+}
+
 function validate(rows,interval){
   const x={duplicates:0,gaps:0,missingBars:0,ohlc:0,invalid:0,negativeVolume:0,missingTimestamps:[]};
   for(let i=0;i<rows.length;i++){
@@ -220,9 +325,9 @@ function validate(rows,interval){
   }
   return x;
 }
-function expectedCount(bounds,interval,g){
+function expectedCount(bounds,interval,g,effectiveStart=bounds.start){
   const anchor=bucketAnchor(g);
-  const first=alignedFloor(bounds.start,interval,anchor);
+  const first=Math.max(alignedFloor(bounds.start,interval,anchor),effectiveStart);
   const last=bounds.endExclusive-interval;
   return last<first?0:Math.floor((last-first)/interval)+1;
 }
@@ -257,11 +362,14 @@ async function repairMissing(symbol,g,interval,map,bounds,maxRounds=3){
 function evaluateOhlcv(){
   const g=$("granularity").value,interval=INTERVAL_MS[g],bounds=getOhlcvBounds();
   collected=[...candleMap.values()].filter(r=>r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive).sort((a,b)=>a.timestamp-b.timestamp);
-  const issues=validate(collected,interval),expected=expectedCount(bounds,interval,g);
-  const complete=collected.length===expected && (!collected.length||collected[0].timestamp===bounds.start);
+  const floorUsable=apiFloorConfirmed&&Number.isFinite(apiFloorMs)&&apiFloorMs>bounds.start&&apiFloorMs<bounds.endExclusive;
+  const effectiveStart=floorUsable?apiFloorMs:bounds.start;
+  const issues=validate(collected,interval),expected=expectedCount(bounds,interval,g,effectiveStart);
+  const complete=collected.length===expected && (!collected.length||collected[0].timestamp===effectiveStart);
   const clean=complete&&issues.duplicates===0&&issues.missingBars===0&&issues.ohlc===0&&issues.invalid===0&&issues.negativeVolume===0;
-  collectedMeta={clean,symbol:cleanSymbol($("symbol").value),g,bounds,issues,expected};
-  return {clean,issues,expected,complete};
+  const unavailableBefore=Math.max(0,Math.round((effectiveStart-bounds.start)/interval));
+  collectedMeta={clean,symbol:cleanSymbol($("symbol").value),g,bounds,issues,expected,effectiveStart,unavailableBefore};
+  return {clean,issues,expected,complete,effectiveStart,unavailableBefore,floorUsable};
 }
 function renderOhlcvReport(extra={repaired:0}){
   let x;
@@ -270,8 +378,10 @@ function renderOhlcvReport(extra={repaired:0}){
     ["수집 봉",collected.length.toLocaleString()+"개"],
     ["첫 봉",collected.length?iso(collected[0].timestamp):"-"],
     ["마지막 봉",collected.length?iso(collected.at(-1).timestamp):"-"],
+    ["유효 시작점",x.floorUsable?iso(x.effectiveStart):iso(getOhlcvBounds().start)],
+    ["API 제공 전 구간",x.unavailableBefore.toLocaleString()+"봉"],
     ["예상/실제",`${x.expected.toLocaleString()} / ${collected.length.toLocaleString()}`],
-    ["기간 완전성",x.complete?"완전":"부족"],
+    ["기간 완전성",x.complete?(x.floorUsable?"API 제공범위 기준 완전":"완전"):"부족"],
     ["자동 복구",(extra.repaired||0).toLocaleString()+"개"],
     ["중복",x.issues.duplicates+"개"],
     ["남은 내부 누락",x.issues.missingBars+"개"],
@@ -293,7 +403,13 @@ async function collectOhlcv(){
   setBusy(true);
   candleMap=new Map();
   collected=[];
-  apiFloorMs=null;
+  if(availableRange.confirmed&&availableRange.symbol===symbol&&availableRange.g===g){
+    apiFloorMs=availableRange.floor;
+    apiFloorConfirmed=true;
+  }else{
+    apiFloorMs=null;
+    apiFloorConfirmed=false;
+  }
   $("ohlcvReport").innerHTML="";
   $("ohlcvDownloadBtn").disabled=true;
   try{
@@ -302,7 +418,21 @@ async function collectOhlcv(){
     while(cursor>bounds.start){
       const page=await fetchHistoryPageV2(symbol,g,cursor);
       calls++;
-      if(!page.length)break;
+      if(!page.length){
+        let currentOldest=null;
+        for(const ts of candleMap.keys())if(currentOldest===null||ts<currentOldest)currentOldest=ts;
+        if(Number.isFinite(currentOldest)){
+          const fb=await fetchOlderFallback(symbol,g,currentOldest);
+          if(fb.page.length&&fb.page[0].timestamp<currentOldest){
+            for(const r of fb.page)if(r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive)candleMap.set(r.timestamp,r);
+            previousOldest=fb.page[0].timestamp;
+            cursor=previousOldest-1;
+            continue;
+          }
+          if(fb.confirmedFloor){apiFloorMs=currentOldest;apiFloorConfirmed=true;}
+        }
+        break;
+      }
       for(const r of page)if(r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive)candleMap.set(r.timestamp,r);
       const oldest=page[0].timestamp;
       $("progress").value=Math.min(88,Math.round(calls/estimated*88));
@@ -317,7 +447,11 @@ async function collectOhlcv(){
           await sleep(70);
           continue;
         }
-        apiFloorMs=previousOldest;
+        if(fb.confirmedFloor){
+          apiFloorMs=previousOldest;
+          apiFloorConfirmed=true;
+          availableRange={symbol,g,floor:apiFloorMs,last:availableRange.last,confirmed:true};
+        }
         break;
       }
       previousOldest=oldest;
@@ -328,7 +462,7 @@ async function collectOhlcv(){
     const x=renderOhlcvReport(repair);
     $("progress").value=100;
     if(x.clean){
-      setText("status",`OHLCV 전체기간 검증 통과: ${collected.length.toLocaleString()}봉\n아래 '검증 완료 OHLCV CSV 다운로드' 버튼을 누르세요.`,"ok");
+      setText("status",`OHLCV 전체기간 검증 통과: ${collected.length.toLocaleString()}봉${x.floorUsable?`\nBitget 최초 제공 봉 ${iso(x.effectiveStart)} 기준으로 완전합니다. 요청일 시작 전 ${x.unavailableBefore}봉은 실제 제공 전 구간으로 제외했습니다.`:""}\n아래 '검증 완료 OHLCV CSV 다운로드' 버튼을 누르세요.`,"ok");
     }else{
       setText("status",`OHLCV 요청기간이 아직 완전하지 않습니다.${apiFloorMs?`\nAPI 바닥/반복 감지: ${iso(apiFloorMs)}`:""}\n아래 '과거 OHLCV CSV 보완'에서 Bitget Futures Candlestick CSV를 추가한 뒤 재검증하세요.`,"warn");
     }
@@ -429,22 +563,33 @@ function downloadOhlcv(){
   for(const r of collected)lines.push([r.timestamp,iso(r.timestamp),r.open,r.high,r.low,r.close,r.volume_base,r.volume_quote].map(csvEscape).join(","));
   saveCsv(lines,`${collectedMeta.symbol}_${LABEL[collectedMeta.g]}_OHLCV_${displayDateForTimestamp(collected[0].timestamp,collectedMeta.g)}_${displayDateForTimestamp(collected.at(-1).timestamp,collectedMeta.g)}.csv`);
 }
-function clearOhlcv(){
+function clearOhlcv(preserveRange=false){
   candleMap=new Map();
   collected=[];
   collectedMeta={clean:false,symbol:"",g:"",bounds:null};
-  apiFloorMs=null;
+  if(!preserveRange){apiFloorMs=null;apiFloorConfirmed=false;}
   $("ohlcvReport").innerHTML="";
   $("ohlcvDownloadBtn").disabled=true;
   setText("status","OHLCV 메모리를 초기화했습니다.","warn");
 }
-function resetForInputs(){
-  clearOhlcv();
+function resetForInputs(resetAvailability=false){
+  clearOhlcv(true);
+  if(resetAvailability){
+    availableRange={symbol:"",g:"",floor:null,last:null,confirmed:false};
+    apiFloorMs=null;apiFloorConfirmed=false;
+    $("applyRangeBtn").disabled=true;
+    setText("rangeStatus","","");
+  }else if(availableRange.confirmed){
+    apiFloorMs=availableRange.floor;apiFloorConfirmed=true;
+  }
   setText("status","수집 조건이 변경되었습니다. 새 조건으로 다시 수집하세요.","warn");
 }
 
-$("granularity").addEventListener("change",()=>{updateDateLabels();resetForInputs();});
-for(const id of ["symbol","ohlcvStart","ohlcvEnd"]){$(id).addEventListener("change",resetForInputs);}
+$("granularity").addEventListener("change",()=>{updateDateLabels();resetForInputs(true);});
+$("symbol").addEventListener("change",()=>resetForInputs(true));
+for(const id of ["ohlcvStart","ohlcvEnd"]){$(id).addEventListener("change",()=>resetForInputs(false));}
+$("rangeBtn").addEventListener("click",findAvailableRange);
+$("applyRangeBtn").addEventListener("click",applyAvailableRange);
 $("collectBtn").addEventListener("click",collectOhlcv);
 $("cancelBtn").addEventListener("click",()=>aborter?.abort());
 $("candleImportBtn").addEventListener("click",importCandleFiles);
