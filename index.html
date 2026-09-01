@@ -1,0 +1,458 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <title>HMN Data Collector 1.7.0 - OHLCV Only</title>
+  <style>
+    :root { color-scheme:dark; --bg:#0b1020; --card:#151c2f; --line:#2a3550; --text:#f3f4f6; --muted:#a9b2c5; --ok:#34d399; --warn:#fbbf24; --bad:#fb7185; --accent:#60a5fa; }
+    * { box-sizing:border-box; }
+    body { margin:0; font-family:system-ui,-apple-system,"Noto Sans KR",sans-serif; background:var(--bg); color:var(--text); }
+    main { max-width:860px; margin:auto; padding:20px 14px 54px; }
+    h1 { font-size:1.55rem; margin:4px 0 8px; }
+    h2 { font-size:1.08rem; margin:0 0 10px; }
+    .sub { color:var(--muted); margin:0 0 18px; line-height:1.55; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:16px; padding:16px; margin:12px 0; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+    label { display:block; color:var(--muted); font-size:.9rem; margin-bottom:6px; }
+    input,select,button { width:100%; min-height:46px; border-radius:10px; border:1px solid var(--line); font-size:1rem; }
+    input,select { background:#0f1628; color:var(--text); padding:0 12px; }
+    button { padding:10px 12px; font-weight:700; cursor:pointer; background:#22304d; color:var(--text); }
+    button.primary { background:var(--accent); color:#08111f; border-color:transparent; }
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    .actions { display:grid; grid-template-columns:1fr 1fr; gap:10px; margin-top:14px; }
+    .status { white-space:pre-wrap; line-height:1.55; color:var(--muted); min-height:24px; overflow-wrap:anywhere; }
+    .ok { color:var(--ok); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+    .report { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:10px; }
+    .metric { border:1px solid var(--line); border-radius:10px; padding:10px; }
+    .metric b { display:block; font-size:1.02rem; margin-top:3px; overflow-wrap:anywhere; }
+    .small { font-size:.84rem; color:var(--muted); line-height:1.55; }
+    .note { border-left:3px solid var(--accent); padding:9px 11px; background:#10192b; border-radius:6px; color:var(--muted); line-height:1.55; }
+    progress { width:100%; height:12px; margin-top:10px; }
+    code { overflow-wrap:anywhere; }
+    @media (max-width:640px) { .grid,.actions,.report { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.7.0 · OHLCV Only</small></h1>
+  <p class="sub">Order Flow 기능을 제거한 OHLCV 전용 버전입니다. 선택 기간 전체를 Bitget Historical Candles API로 수집하고, 중복·누락·OHLC 오류를 검증한 뒤 검증 통과 데이터만 CSV로 다운로드합니다.</p>
+
+  <section class="card">
+    <h2>1. OHLCV 수집 범위</h2>
+    <div class="grid">
+      <div>
+        <label for="symbol">종목</label>
+        <input id="symbol" list="symbols" value="BTCUSDT" autocomplete="off" />
+        <datalist id="symbols"><option value="BTCUSDT"><option value="ETHUSDT"><option value="SOLUSDT"></datalist>
+      </div>
+      <div>
+        <label for="granularity">시간봉</label>
+        <select id="granularity">
+          <option value="1H" selected>1시간</option>
+          <option value="4H">4시간</option>
+          <option value="1D">일봉(Bitget UTC+8 경계)</option>
+        </select>
+      </div>
+      <div>
+        <label id="ohlcvStartLabel" for="ohlcvStart">OHLCV 시작일(UTC)</label>
+        <input id="ohlcvStart" type="date" value="2019-07-10" />
+      </div>
+      <div>
+        <label id="ohlcvEndLabel" for="ohlcvEnd">OHLCV 종료일(UTC)</label>
+        <input id="ohlcvEnd" type="date" value="2026-07-31" />
+      </div>
+    </div>
+    <p class="note">기본값은 BTCUSDT 2019-07-10 ~ 2026-07-31입니다. 날짜는 필요하면 변경할 수 있습니다. 1D는 Bitget UTC+8 일봉 경계를 사용합니다.</p>
+  </section>
+
+  <section class="card">
+    <h2>2. 전체기간 OHLCV 수집·검증</h2>
+    <p class="small">Bitget Historical Candles API를 과거 방향으로 반복 조회합니다. API가 요청 시작일까지 내려가지 못하면 이미 받은 데이터는 보존하고, 아래 Candlestick CSV 보완 기능으로 부족 구간만 추가할 수 있습니다.</p>
+    <div class="actions">
+      <button id="collectBtn" class="primary">OHLCV 전체 수집·검증</button>
+      <button id="cancelBtn" disabled>작업 중지</button>
+    </div>
+    <progress id="progress" max="100" value="0" hidden></progress>
+    <p id="status" class="status"></p>
+    <div id="ohlcvReport" class="report"></div>
+    <div class="actions">
+      <button id="ohlcvDownloadBtn" disabled>검증 완료 OHLCV CSV 다운로드</button>
+      <button id="clearOhlcvBtn">OHLCV 메모리 초기화</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>3. 과거 OHLCV CSV 보완 — 필요한 경우에만</h2>
+    <p class="small">API가 오래된 구간까지 내려가지 못한 경우에만 사용합니다. Bitget History data download → Futures → Candlestick CSV를 압축 해제해 선택하세요. 현재 시간봉과 timestamp가 일치하는 봉만 병합하고 중복 제거 후 전체기간을 다시 검증합니다.</p>
+    <label for="candleFiles">Bitget Futures Candlestick CSV (복수 선택 가능)</label>
+    <input id="candleFiles" type="file" accept=".csv,text/csv" multiple />
+    <div class="actions">
+      <button id="candleImportBtn">OHLCV CSV 병합·재검증</button>
+      <button id="candleClearBtn">선택 파일 초기화</button>
+    </div>
+    <p id="candleStatus" class="status"></p>
+  </section>
+
+  <section class="card">
+    <h2>CSV 형식</h2>
+    <p class="small"><code>timestamp, datetime_utc, open, high, low, close, volume_base, volume_quote</code></p>
+    <p class="small">CSV 다운로드는 요청기간의 예상 봉 수가 모두 존재하고, 중복·내부 누락·OHLC·숫자·음수 거래량 오류가 모두 0일 때만 활성화됩니다.</p>
+  </section>
+</main>
+
+<script>
+"use strict";
+
+const API = "https://api.bitget.com/api/v2/mix/market";
+const API_V3 = "https://api.bitget.com/api/v3/market";
+const PRODUCT = "usdt-futures";
+const CATEGORY = "USDT-FUTURES";
+const VERSION = "1.7.0";
+const INTERVAL_MS = {"1H":3600000,"4H":14400000,"1D":86400000};
+const LABEL = {"1H":"1H","4H":"4H","1D":"1D"};
+const V3_HISTORY_INTERVALS = new Set(["1H","4H","1D"]);
+const $ = id => document.getElementById(id);
+
+let aborter = null;
+let candleMap = new Map();
+let collected = [];
+let collectedMeta = {clean:false,symbol:"",g:"",bounds:null};
+let apiFloorMs = null;
+
+function iso(ms){ return new Date(ms).toISOString(); }
+function ymd(ms){ return iso(ms).slice(0,10); }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+function cleanSymbol(v){ return v.trim().toUpperCase().replace(/[^A-Z0-9]/g,""); }
+function setText(id,msg,cls=""){ $(id).className="status "+cls; $(id).textContent=msg; }
+function isBitgetDaily(g){ return g==="1D"; }
+function dailyOffsetMs(g){ return isBitgetDaily(g) ? -8*3600000 : 0; }
+function selectedDateToUtc(value,g){ return Date.parse(value+"T00:00:00.000Z")+dailyOffsetMs(g); }
+function displayDateForTimestamp(ms,g){ return isBitgetDaily(g) ? ymd(ms+8*3600000) : ymd(ms); }
+function alignedFloor(ms,interval,anchor=0){ return Math.floor((ms-anchor)/interval)*interval+anchor; }
+function bucketAnchor(g){ return g==="1D" ? 16*3600000 : 0; }
+function bucketTimestamp(ms,g){ return alignedFloor(ms,INTERVAL_MS[g],bucketAnchor(g)); }
+
+function updateDateLabels(){
+  const g=$("granularity").value;
+  const suffix=isBitgetDaily(g)?"Bitget UTC+8 일봉 날짜":"UTC";
+  $("ohlcvStartLabel").textContent=`OHLCV 시작일(${suffix})`;
+  $("ohlcvEndLabel").textContent=`OHLCV 종료일(${suffix})`;
+}
+function getOhlcvBounds(){
+  const g=$("granularity").value,s=$("ohlcvStart").value,e=$("ohlcvEnd").value;
+  if(!s||!e) throw new Error("시작일과 종료일을 입력하세요.");
+  const start=selectedDateToUtc(s,g),endExclusive=selectedDateToUtc(e,g)+86400000;
+  if(start>=endExclusive) throw new Error("종료일은 시작일보다 늦어야 합니다.");
+  return {start,endExclusive};
+}
+function setBusy(on){
+  for(const id of ["collectBtn","candleImportBtn","clearOhlcvBtn"]){ if($(id))$(id).disabled=on; }
+  $("cancelBtn").disabled=!on;
+  $("progress").hidden=!on;
+  if(!on)$("progress").value=0;
+}
+
+async function api(path,params,retries=4){
+  const url=API+path+"?"+new URLSearchParams(params); let last;
+  for(let i=0;i<retries;i++){
+    try{
+      const res=await fetch(url,{signal:aborter?.signal,cache:"no-store"});
+      if(!res.ok) throw new Error("HTTP "+res.status);
+      const j=await res.json();
+      if(j.code!=="00000") throw new Error((j.msg||"Bitget 오류")+" ("+j.code+")");
+      return j.data||[];
+    }catch(e){
+      last=e;
+      if(e.name==="AbortError")throw e;
+      await sleep(500*Math.pow(2,i));
+    }
+  }
+  throw last;
+}
+function parseRows(raw){
+  return raw.map(r=>({timestamp:Number(r[0]),open:Number(r[1]),high:Number(r[2]),low:Number(r[3]),close:Number(r[4]),volume_base:Number(r[5]),volume_quote:Number(r[6])})).filter(r=>Number.isFinite(r.timestamp));
+}
+async function fetchHistoryPageV2(symbol,g,endTime){
+  const raw=await api("/history-candles",{symbol,productType:PRODUCT,granularity:g,endTime:String(Math.floor(endTime)),limit:"200"});
+  return parseRows(raw).sort((a,b)=>a.timestamp-b.timestamp);
+}
+async function fetchHistoryPageV3(symbol,g,endTime){
+  if(!V3_HISTORY_INTERVALS.has(g))return[];
+  const url=API_V3+"/history-candles?"+new URLSearchParams({category:CATEGORY,symbol,interval:g,endTime:String(Math.floor(endTime)),type:"market",limit:"100"});
+  const res=await fetch(url,{signal:aborter?.signal,cache:"no-store"});
+  if(!res.ok)throw new Error("V3 HTTP "+res.status);
+  const j=await res.json();
+  if(j.code!=="00000")throw new Error((j.msg||"Bitget V3 오류")+" ("+j.code+")");
+  return parseRows(j.data||[]).sort((a,b)=>a.timestamp-b.timestamp);
+}
+async function fetchOlderFallback(symbol,g,oldest){
+  const target=oldest-1;
+  try{
+    const p=await fetchHistoryPageV2(symbol,g,target);
+    if(p.length&&p[0].timestamp<oldest)return{page:p,source:"v2"};
+  }catch(_e){}
+  try{
+    const p=await fetchHistoryPageV3(symbol,g,target);
+    if(p.length&&p[0].timestamp<oldest)return{page:p,source:"v3"};
+  }catch(_e){}
+  return {page:[],source:"none"};
+}
+function validate(rows,interval){
+  const x={duplicates:0,gaps:0,missingBars:0,ohlc:0,invalid:0,negativeVolume:0,missingTimestamps:[]};
+  for(let i=0;i<rows.length;i++){
+    const r=rows[i],nums=[r.timestamp,r.open,r.high,r.low,r.close,r.volume_base,r.volume_quote];
+    if(nums.some(v=>!Number.isFinite(v)))x.invalid++;
+    if(r.open<=0||r.high<=0||r.low<=0||r.close<=0)x.invalid++;
+    if(r.high<Math.max(r.open,r.close,r.low)||r.low>Math.min(r.open,r.close,r.high))x.ohlc++;
+    if(r.volume_base<0||r.volume_quote<0)x.negativeVolume++;
+    if(i){
+      const d=r.timestamp-rows[i-1].timestamp;
+      if(d===0)x.duplicates++;
+      else if(d>interval){
+        x.gaps++;
+        const n=Math.max(0,Math.round(d/interval)-1);
+        x.missingBars+=n;
+        for(let k=1;k<=n;k++)x.missingTimestamps.push(rows[i-1].timestamp+k*interval);
+      }else if(d<interval)x.gaps++;
+    }
+  }
+  return x;
+}
+function expectedCount(bounds,interval,g){
+  const anchor=bucketAnchor(g);
+  const first=alignedFloor(bounds.start,interval,anchor);
+  const last=bounds.endExclusive-interval;
+  return last<first?0:Math.floor((last-first)/interval)+1;
+}
+async function fetchExactCandle(symbol,g,target,interval){
+  for(const endTime of [target+interval,target+interval+1,target+2*interval,target+1]){
+    const p=await fetchHistoryPageV2(symbol,g,endTime);
+    const e=p.find(r=>r.timestamp===target);
+    if(e)return e;
+  }
+  return null;
+}
+async function repairMissing(symbol,g,interval,map,bounds,maxRounds=3){
+  let repaired=0,attempted=0,unresolved=[];
+  for(let round=1;round<=maxRounds;round++){
+    const rows=[...map.values()].filter(r=>r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive).sort((a,b)=>a.timestamp-b.timestamp);
+    const targets=[...new Set(validate(rows,interval).missingTimestamps)];
+    if(!targets.length){unresolved=[];break;}
+    let added=0; unresolved=[];
+    for(let i=0;i<targets.length;i++){
+      attempted++;
+      const exact=await fetchExactCandle(symbol,g,targets[i],interval);
+      if(exact&&exact.timestamp>=bounds.start&&exact.timestamp<bounds.endExclusive){
+        if(!map.has(exact.timestamp)){map.set(exact.timestamp,exact);repaired++;added++;}
+      }else unresolved.push(targets[i]);
+      $("progress").value=Math.min(99,90+Math.round((i+1)/targets.length*9));
+      await sleep(60);
+    }
+    if(!added)break;
+  }
+  return {repaired,attempted,unresolved};
+}
+function evaluateOhlcv(){
+  const g=$("granularity").value,interval=INTERVAL_MS[g],bounds=getOhlcvBounds();
+  collected=[...candleMap.values()].filter(r=>r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive).sort((a,b)=>a.timestamp-b.timestamp);
+  const issues=validate(collected,interval),expected=expectedCount(bounds,interval,g);
+  const complete=collected.length===expected && (!collected.length||collected[0].timestamp===bounds.start);
+  const clean=complete&&issues.duplicates===0&&issues.missingBars===0&&issues.ohlc===0&&issues.invalid===0&&issues.negativeVolume===0;
+  collectedMeta={clean,symbol:cleanSymbol($("symbol").value),g,bounds,issues,expected};
+  return {clean,issues,expected,complete};
+}
+function renderOhlcvReport(extra={repaired:0}){
+  let x;
+  try{x=evaluateOhlcv();}catch(e){$("ohlcvReport").innerHTML="";return;}
+  const items=[
+    ["수집 봉",collected.length.toLocaleString()+"개"],
+    ["첫 봉",collected.length?iso(collected[0].timestamp):"-"],
+    ["마지막 봉",collected.length?iso(collected.at(-1).timestamp):"-"],
+    ["예상/실제",`${x.expected.toLocaleString()} / ${collected.length.toLocaleString()}`],
+    ["기간 완전성",x.complete?"완전":"부족"],
+    ["자동 복구",(extra.repaired||0).toLocaleString()+"개"],
+    ["중복",x.issues.duplicates+"개"],
+    ["남은 내부 누락",x.issues.missingBars+"개"],
+    ["OHLC 오류",x.issues.ohlc+"개"],
+    ["숫자 오류",x.issues.invalid+"개"],
+    ["음수 거래량",x.issues.negativeVolume+"개"],
+    ["최종 상태",x.clean?"CSV 다운로드 가능":"보완 필요"]
+  ];
+  $("ohlcvReport").innerHTML=items.map(([a,b])=>`<div class="metric"><span class="small">${a}</span><b>${b}</b></div>`).join("");
+  $("ohlcvDownloadBtn").disabled=!x.clean;
+  return x;
+}
+async function collectOhlcv(){
+  const symbol=cleanSymbol($("symbol").value),g=$("granularity").value,interval=INTERVAL_MS[g];
+  if(!symbol)return setText("status","종목을 입력하세요.","bad");
+  let bounds;
+  try{bounds=getOhlcvBounds();}catch(e){return setText("status",e.message,"bad");}
+  aborter=new AbortController();
+  setBusy(true);
+  candleMap=new Map();
+  collected=[];
+  apiFloorMs=null;
+  $("ohlcvReport").innerHTML="";
+  $("ohlcvDownloadBtn").disabled=true;
+  try{
+    let cursor=bounds.endExclusive,calls=0,previousOldest=Infinity;
+    const estimated=Math.max(1,Math.ceil((bounds.endExclusive-bounds.start)/(interval*180)));
+    while(cursor>bounds.start){
+      const page=await fetchHistoryPageV2(symbol,g,cursor);
+      calls++;
+      if(!page.length)break;
+      for(const r of page)if(r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive)candleMap.set(r.timestamp,r);
+      const oldest=page[0].timestamp;
+      $("progress").value=Math.min(88,Math.round(calls/estimated*88));
+      setText("status",`OHLCV 전체기간 수집 중… API ${calls}회\n확보 ${candleMap.size.toLocaleString()}봉\n현재 가장 과거 ${iso(oldest)}`);
+      if(oldest<=bounds.start)break;
+      if(oldest>=previousOldest){
+        const fb=await fetchOlderFallback(symbol,g,previousOldest);
+        if(fb.page.length&&fb.page[0].timestamp<previousOldest){
+          for(const r of fb.page)if(r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive)candleMap.set(r.timestamp,r);
+          previousOldest=fb.page[0].timestamp;
+          cursor=previousOldest-1;
+          await sleep(70);
+          continue;
+        }
+        apiFloorMs=previousOldest;
+        break;
+      }
+      previousOldest=oldest;
+      cursor=oldest-1;
+      await sleep(70);
+    }
+    const repair=await repairMissing(symbol,g,interval,candleMap,bounds);
+    const x=renderOhlcvReport(repair);
+    $("progress").value=100;
+    if(x.clean){
+      setText("status",`OHLCV 전체기간 검증 통과: ${collected.length.toLocaleString()}봉\n아래 '검증 완료 OHLCV CSV 다운로드' 버튼을 누르세요.`,"ok");
+    }else{
+      setText("status",`OHLCV 요청기간이 아직 완전하지 않습니다.${apiFloorMs?`\nAPI 바닥/반복 감지: ${iso(apiFloorMs)}`:""}\n아래 '과거 OHLCV CSV 보완'에서 Bitget Futures Candlestick CSV를 추가한 뒤 재검증하세요.`,"warn");
+    }
+  }catch(e){
+    setText("status",e.name==="AbortError"?"작업을 중지했습니다.":`수집 실패: ${e.message}`,"bad");
+  }finally{
+    setBusy(false);
+    aborter=null;
+  }
+}
+
+function splitCsvLine(line){
+  const out=[];let cur="",q=false;
+  for(let i=0;i<line.length;i++){
+    const ch=line[i];
+    if(ch==='"'){
+      if(q&&line[i+1]==='"'){cur+='"';i++;}else q=!q;
+    }else if(ch===','&&!q){out.push(cur);cur="";}
+    else cur+=ch;
+  }
+  out.push(cur);
+  return out;
+}
+function normalizeHeader(s){return String(s||"").trim().toLowerCase().replace(/[^a-z0-9]/g,"");}
+function pickIndex(headers,names){const norm=headers.map(normalizeHeader);for(const n of names){const i=norm.indexOf(normalizeHeader(n));if(i>=0)return i;}return -1;}
+function parseEpoch(raw){
+  const s=String(raw??"").trim(); let n=Number(s);
+  if(Number.isFinite(n)){
+    if(n>1e17)n=Math.floor(n/1e6);
+    else if(n>1e14)n=Math.floor(n/1e3);
+    else if(n<1e11)n*=1000;
+    return n;
+  }
+  return Date.parse(s);
+}
+function parseCandleCsv(text){
+  const lines=text.replace(/^\uFEFF/,"").split(/\r?\n/).filter(x=>x.trim());
+  if(!lines.length)return[];
+  const first=splitCsvLine(lines[0]),hasHeader=first.some(v=>/[A-Za-z_]/.test(String(v)));
+  let start=0,ti=0,oi=1,hi=2,li=3,ci=4,vi=5,qi=6;
+  if(hasHeader){
+    const h=first;start=1;
+    ti=pickIndex(h,["timestamp","ts","time","opentime","datetime","datetimeutc"]);
+    oi=pickIndex(h,["open","openprice"]);
+    hi=pickIndex(h,["high","highprice"]);
+    li=pickIndex(h,["low","lowprice"]);
+    ci=pickIndex(h,["close","closeprice"]);
+    vi=pickIndex(h,["volumebase","basevolume","volume","vol"]);
+    qi=pickIndex(h,["volumequote","quotevolume","turnover","quotevol"]);
+    if([ti,oi,hi,li,ci,vi].some(i=>i<0))throw new Error(`Candlestick 필수 열을 찾지 못했습니다. 실제: ${h.join(" | ")}`);
+  }
+  const rows=[];
+  for(let i=start;i<lines.length;i++){
+    const a=splitCsvLine(lines[i]);
+    const r={timestamp:parseEpoch(a[ti]),open:Number(a[oi]),high:Number(a[hi]),low:Number(a[li]),close:Number(a[ci]),volume_base:Number(a[vi]),volume_quote:qi>=0?Number(a[qi]):0};
+    if([r.timestamp,r.open,r.high,r.low,r.close,r.volume_base].every(Number.isFinite))rows.push(r);
+  }
+  return rows;
+}
+async function importCandleFiles(){
+  const files=[...($("candleFiles").files||[])];
+  if(!files.length)return setText("candleStatus","Futures Candlestick CSV 파일을 선택하세요.","warn");
+  try{
+    setBusy(true);
+    const g=$("granularity").value,bounds=getOhlcvBounds();
+    let added=0,parsed=0;
+    for(let k=0;k<files.length;k++){
+      const rows=parseCandleCsv(await files[k].text());
+      parsed+=rows.length;
+      for(const r of rows){
+        if(r.timestamp<bounds.start||r.timestamp>=bounds.endExclusive)continue;
+        if(Math.abs(bucketTimestamp(r.timestamp,g)-r.timestamp)>1)continue;
+        if(!candleMap.has(r.timestamp))added++;
+        candleMap.set(r.timestamp,r);
+      }
+      setText("candleStatus",`처리 ${k+1}/${files.length} · 파싱 ${parsed.toLocaleString()}봉 · 신규 ${added.toLocaleString()}봉`);
+    }
+    const x=renderOhlcvReport();
+    setText("candleStatus",x.clean?`OHLCV 병합 완료: ${collected.length.toLocaleString()}봉 · 요청기간 전체 검증 통과`:`병합 후에도 요청기간이 완전하지 않습니다. 현재 ${collected.length.toLocaleString()}봉`,x.clean?"ok":"warn");
+  }catch(e){
+    setText("candleStatus","OHLCV CSV 처리 실패: "+e.message,"bad");
+  }finally{
+    setBusy(false);
+  }
+}
+
+function csvEscape(v){const s=String(v??"");return /[",\n]/.test(s)?'"'+s.replaceAll('"','""')+'"':s;}
+function saveCsv(lines,name){
+  const blob=new Blob(["\uFEFF"+lines.join("\n")],{type:"text/csv;charset=utf-8"}),a=document.createElement("a");
+  a.href=URL.createObjectURL(blob);
+  a.download=name;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+function downloadOhlcv(){
+  if(!collectedMeta.clean)return;
+  const h=["timestamp","datetime_utc","open","high","low","close","volume_base","volume_quote"],lines=[h.join(",")];
+  for(const r of collected)lines.push([r.timestamp,iso(r.timestamp),r.open,r.high,r.low,r.close,r.volume_base,r.volume_quote].map(csvEscape).join(","));
+  saveCsv(lines,`${collectedMeta.symbol}_${LABEL[collectedMeta.g]}_OHLCV_${displayDateForTimestamp(collected[0].timestamp,collectedMeta.g)}_${displayDateForTimestamp(collected.at(-1).timestamp,collectedMeta.g)}.csv`);
+}
+function clearOhlcv(){
+  candleMap=new Map();
+  collected=[];
+  collectedMeta={clean:false,symbol:"",g:"",bounds:null};
+  apiFloorMs=null;
+  $("ohlcvReport").innerHTML="";
+  $("ohlcvDownloadBtn").disabled=true;
+  setText("status","OHLCV 메모리를 초기화했습니다.","warn");
+}
+function resetForInputs(){
+  clearOhlcv();
+  setText("status","수집 조건이 변경되었습니다. 새 조건으로 다시 수집하세요.","warn");
+}
+
+$("granularity").addEventListener("change",()=>{updateDateLabels();resetForInputs();});
+for(const id of ["symbol","ohlcvStart","ohlcvEnd"]){$(id).addEventListener("change",resetForInputs);}
+$("collectBtn").addEventListener("click",collectOhlcv);
+$("cancelBtn").addEventListener("click",()=>aborter?.abort());
+$("candleImportBtn").addEventListener("click",importCandleFiles);
+$("candleClearBtn").addEventListener("click",()=>{$("candleFiles").value="";setText("candleStatus","선택한 Candlestick 파일을 초기화했습니다.","warn");});
+$("ohlcvDownloadBtn").addEventListener("click",downloadOhlcv);
+$("clearOhlcvBtn").addEventListener("click",clearOhlcv);
+
+updateDateLabels();
+</script>
+</body>
+</html>
