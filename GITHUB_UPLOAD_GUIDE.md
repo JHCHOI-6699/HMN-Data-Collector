@@ -1,4 +1,4 @@
-# GitHub 업로드 가이드 — v1.7.2
+# GitHub 업로드 가이드 — v1.7.3
 
 기존 `HMN-Data-Collector` 저장소를 삭제할 필요가 없습니다.
 
@@ -9,12 +9,12 @@
    - `README.md`
    - `CHANGELOG.md`
    - `GITHUB_UPLOAD_GUIDE.md`
-4. Commit message 예: `Update HMN Data Collector to v1.7.2`
+4. Commit message 예: `Update HMN Data Collector to v1.7.3`
 5. **Commit changes**를 누릅니다.
 6. 기존 GitHub Pages 설정 `main / (root)`은 변경하지 않습니다.
 7. Actions에서 `pages build and deployment`가 초록 체크인지 확인합니다.
 8. 기존 Pages 주소를 열고 **Ctrl + F5**를 누릅니다.
-9. 화면 상단에 `v1.7.2 · OHLCV Only`가 표시되는지 확인합니다.
+9. 화면 상단에 `v1.7.3 · OHLCV Only`가 표시되는지 확인합니다.
 
 ## 사용 순서
 

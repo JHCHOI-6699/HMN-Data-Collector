@@ -1,9 +1,10 @@
-# HMN Data Collector v1.7.2 · OHLCV Only
+# HMN Data Collector v1.7.3 · OHLCV Only
 
 Bitget USDT Futures의 OHLCV를 장기간 수집·검증하고 CSV로 다운로드하는 GitHub Pages용 단일 페이지 도구입니다.
 
 ## 지원 시간봉
 
+- 1m
 - 5m
 - 15m
 - 30m
@@ -27,9 +28,11 @@ Bitget USDT Futures의 OHLCV를 장기간 수집·검증하고 CSV로 다운로�
 
 `timestamp,datetime_utc,open,high,low,close,volume_base,volume_quote`
 
-## 5m 장기 수집 주의
+## 1m 장기 수집 주의
 
-2019년부터 5m 데이터를 수집하면 수십만 개의 봉을 브라우저 메모리에 보관합니다. 네트워크/API 응답 속도에 따라 수분 이상 걸릴 수 있으므로 데스크톱 브라우저 사용을 권장합니다. 작업 중에는 탭을 닫거나 새로고침하지 마세요.
+2019년부터 1m 데이터를 한 번에 수집하면 수백만 개의 봉이 될 수 있습니다. 브라우저 메모리 사용량과 처리시간이 매우 커질 수 있으므로 **1m은 기간을 나눠 수집하는 것을 권장**합니다. PC 데스크톱 브라우저를 사용하고, 작업 중에는 탭을 닫거나 새로고침하지 마세요.
+
+5m도 장기간 전체 수집 시 수십만 개의 봉이 될 수 있으므로 같은 주의가 필요합니다.
 
 ## GitHub Pages
 
