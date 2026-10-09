@@ -7,6 +7,6 @@
 - CHANGELOG.md
 - GITHUB_UPLOAD_GUIDE.md
 
-Commit 예: `Update HMN Data Collector to v1.7.6 diagnostic`
+Commit 예: `Update HMN Data Collector to v1.7.7 gap-open validation`
 
 Pages의 `main / (root)` 설정은 변경하지 않습니다. 배포 완료 후 Collector 페이지에서 Ctrl+F5를 누르세요.
