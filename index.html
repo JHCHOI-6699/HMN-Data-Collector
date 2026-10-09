@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <title>HMN Data Collector 1.7.5 - OHLCV Only</title>
+  <title>HMN Data Collector 1.7.6 - OHLCV Diagnostic</title>
   <style>
     :root { color-scheme:dark; --bg:#0b1020; --card:#151c2f; --line:#2a3550; --text:#f3f4f6; --muted:#a9b2c5; --ok:#34d399; --warn:#fbbf24; --bad:#fb7185; --accent:#60a5fa; }
     * { box-sizing:border-box; }
@@ -36,7 +36,7 @@
 </head>
 <body>
 <main>
-  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.7.5 · OHLCV Only</small></h1>
+  <h1>HMN Data Collector <small style="font-size:.65em;color:var(--muted)">v1.7.6 · OHLCV Diagnostic</small></h1>
   <p class="sub">Order Flow 기능을 제거한 OHLCV 전용 버전입니다. 선택 기간 전체를 Bitget Historical Candles API로 수집하고, 중복·누락·OHLC 오류를 검증한 뒤 검증 통과 데이터만 CSV로 다운로드합니다.</p>
 
   <section class="card">
@@ -89,13 +89,18 @@
     <div id="ohlcvReport" class="report"></div>
     <div class="actions">
       <button id="ohlcvDownloadBtn" disabled>검증 완료 OHLCV CSV 다운로드</button>
-      <button id="clearOhlcvBtn">OHLCV 메모리 초기화</button>
+      <button id="diagDownloadBtn" disabled>OHLC 오류 진단 CSV 다운로드</button>
     </div>
+    <div class="actions">
+      <button id="clearOhlcvBtn">OHLCV 메모리 초기화</button>
+      <button id="diagClearBtn">진단 결과 초기화</button>
+    </div>
+    <p id="diagStatus" class="status"></p>
   </section>
 
   <section class="card">
     <h2>3. 과거 OHLCV CSV 보완 — 필요한 경우에만</h2>
-    <p class="small">API가 오래된 구간까지 내려가지 못한 경우에만 사용합니다. Bitget History data download → Futures → Candlestick CSV를 압축 해제해 선택하세요. 현재 시간봉과 timestamp가 일치하는 봉만 병합하고 중복 제거 후 전체기간을 다시 검증합니다.</p>
+    <p class="small">API가 오래된 구간까지 내려가지 못했고, 동일 시간봉의 공식 CSV를 실제로 확보한 경우에만 사용합니다. 현재 Bitget 웹 History data download 화면은 Futures Candlestick에서 Daily만 보일 수 있으므로 1m 오류 보완에 1D 파일을 사용하면 안 됩니다. 1m OHLC 오류가 남으면 먼저 위의 ‘OHLC 오류 진단 CSV 다운로드’로 V3/V2 원본을 비교하세요.</p>
     <label for="candleFiles">Bitget Futures Candlestick CSV (복수 선택 가능)</label>
     <input id="candleFiles" type="file" accept=".csv,text/csv" multiple />
     <div class="actions">
@@ -119,7 +124,7 @@ const API = "https://api.bitget.com/api/v2/mix/market";
 const API_V3 = "https://api.bitget.com/api/v3/market";
 const PRODUCT = "usdt-futures";
 const CATEGORY = "USDT-FUTURES";
-const VERSION = "1.7.5";
+const VERSION = "1.7.6";
 const INTERVAL_MS = {"1m":60000,"5m":300000,"15m":900000,"30m":1800000,"1H":3600000,"4H":14400000,"1D":86400000};
 const LABEL = {"1m":"1m","5m":"5m","15m":"15m","30m":"30m","1H":"1H","4H":"4H","1D":"1D"};
 const V3_HISTORY_INTERVALS = new Set(["1m","5m","15m","30m","1H","4H","1D"]);
@@ -132,6 +137,7 @@ let collectedMeta = {clean:false,symbol:"",g:"",bounds:null};
 let apiFloorMs = null;
 let apiFloorConfirmed = false;
 let availableRange = {symbol:"",g:"",floor:null,last:null,confirmed:false};
+let ohlcDiagnostics = [];
 
 function iso(ms){ return new Date(ms).toISOString(); }
 function ymd(ms){ return iso(ms).slice(0,10); }
@@ -198,12 +204,12 @@ async function api(path,params,retries=4){
   }
   throw last;
 }
-function parseRows(raw){
-  return raw.map(r=>({timestamp:Number(r[0]),open:Number(r[1]),high:Number(r[2]),low:Number(r[3]),close:Number(r[4]),volume_base:Number(r[5]),volume_quote:Number(r[6])})).filter(r=>Number.isFinite(r.timestamp));
+function parseRows(raw,source="unknown"){
+  return raw.filter(r=>Array.isArray(r)&&r.length>=7).map(r=>({timestamp:Number(r[0]),open:Number(r[1]),high:Number(r[2]),low:Number(r[3]),close:Number(r[4]),volume_base:Number(r[5]),volume_quote:Number(r[6]),_source:source,_raw:r.slice(0,7)})).filter(r=>Number.isFinite(r.timestamp));
 }
 async function fetchHistoryPageV2(symbol,g,endTime){
   const raw=await api("/history-candles",{symbol,productType:PRODUCT,granularity:g,endTime:String(Math.floor(endTime)),limit:String(pageLimitFor(g))});
-  return parseRows(raw).sort((a,b)=>a.timestamp-b.timestamp);
+  return parseRows(raw,"v2-history").sort((a,b)=>a.timestamp-b.timestamp);
 }
 async function fetchHistoryPageV3(symbol,g,endTime){
   if(!V3_HISTORY_INTERVALS.has(g))return[];
@@ -212,7 +218,7 @@ async function fetchHistoryPageV3(symbol,g,endTime){
   if(!res.ok)throw new Error("V3 HTTP "+res.status);
   const j=await res.json();
   if(j.code!=="00000")throw new Error((j.msg||"Bitget V3 오류")+" ("+j.code+")");
-  return parseRows(j.data||[]).sort((a,b)=>a.timestamp-b.timestamp);
+  return parseRows(j.data||[],"v3-history").sort((a,b)=>a.timestamp-b.timestamp);
 }
 async function fetchHistoryPagePrimary(symbol,g,endTime){
   // 1m 장기 데이터는 최신 V3 market history-candles를 우선 사용합니다.
@@ -232,6 +238,22 @@ function candleOhlcValid(r){
     r.open>0&&r.high>0&&r.low>0&&r.close>0 &&
     r.high>=Math.max(r.open,r.close,r.low) && r.low<=Math.min(r.open,r.close,r.high);
 }
+function ohlcFlags(r){
+  if(!r)return "MISSING";
+  const f=[];
+  if(!Number.isFinite(r.open)||!Number.isFinite(r.high)||!Number.isFinite(r.low)||!Number.isFinite(r.close))f.push("NON_NUMERIC");
+  if(r.high<r.open)f.push("HIGH_LT_OPEN");
+  if(r.high<r.close)f.push("HIGH_LT_CLOSE");
+  if(r.high<r.low)f.push("HIGH_LT_LOW");
+  if(r.low>r.open)f.push("LOW_GT_OPEN");
+  if(r.low>r.close)f.push("LOW_GT_CLOSE");
+  if(r.open<=0||r.high<=0||r.low<=0||r.close<=0)f.push("NON_POSITIVE_PRICE");
+  return f.join("|")||"OK";
+}
+function sameOhlc(a,b){
+  return !!a&&!!b&&a.open===b.open&&a.high===b.high&&a.low===b.low&&a.close===b.close;
+}
+
 async function fetchOlderFallback(symbol,g,oldest){
   const target=oldest-1;
   let successfulResponses=0;
@@ -386,12 +408,16 @@ async function fetchExactCandleAlternate(symbol,g,target,interval){
 async function repairInvalidOhlc(symbol,g,interval,map,bounds){
   const rows=[...map.values()].filter(r=>r.timestamp>=bounds.start&&r.timestamp<bounds.endExclusive).sort((a,b)=>a.timestamp-b.timestamp);
   const bad=rows.filter(r=>!candleOhlcValid(r));
-  if(!bad.length)return {repaired:0,unresolved:0,calls:0};
+  ohlcDiagnostics=[];
+  if(!bad.length){
+    $("diagDownloadBtn").disabled=true;
+    setText("diagStatus","OHLC 오류가 없어 진단 파일이 필요하지 않습니다.","ok");
+    return {repaired:0,unresolved:0,calls:0,alternateFound:0,identicalInvalid:0,differentInvalid:0};
+  }
 
-  // v1.7.5: 비정상 봉 하나마다 최대 여러 API를 호출하던 방식을 제거합니다.
-  // 비정상 봉이 존재하는 시간범위를 대체 endpoint로 페이지 단위 역방향 조회하고,
-  // timestamp가 정확히 같은 정상 원본 봉만 교체합니다. 가격을 임의 보정하지 않습니다.
   const badSet=new Set(bad.map(r=>r.timestamp));
+  const originalByTs=new Map(bad.map(r=>[r.timestamp,{...r}]));
+  const alternateByTs=new Map();
   const repairedSet=new Set();
   const minBad=bad[0].timestamp;
   const maxBad=bad.at(-1).timestamp;
@@ -399,27 +425,27 @@ async function repairInvalidOhlc(symbol,g,interval,map,bounds){
   let cursor=Math.min(bounds.endExclusive,maxBad+interval);
   let previousOldest=Infinity;
   const fetchAlt = g==="1m" ? fetchHistoryPageV2 : fetchHistoryPageV3;
-  const altPageSize = g==="1m" ? pageLimitFor(g) : 100;
+  const altPageSize = g==="1m" ? 200 : 100;
   const estimated=Math.max(1,Math.ceil((maxBad-minBad+interval)/(interval*altPageSize)));
-  const hardLimit=Math.min(20000,estimated+50);
+  const hardLimit=Math.min(20000,estimated+100);
 
-  setText("status",`OHLC 이상봉 일괄 교차검증 시작… 대상 ${bad.length.toLocaleString()}봉\n대체 endpoint를 ${estimated.toLocaleString()}페이지 내외로 확인합니다.`);
+  setText("status",`OHLC 이상봉 원본 교차검증 시작… 대상 ${bad.length.toLocaleString()}봉\n${g==="1m"?"V3 수집값 ↔ V2 Historical Candles":"주 수집값 ↔ 대체 endpoint"}를 timestamp 기준으로 비교합니다.`);
 
-  while(cursor>minBad && calls<hardLimit && repairedSet.size<badSet.size){
+  while(cursor>minBad && calls<hardLimit){
     let page=[];
     try{
       page=await fetchAlt(symbol,g,cursor);
     }catch(e){
       if(e.name==="AbortError")throw e;
-      // 일시 오류는 전체 작업을 무한 대기시키지 않고 다음 단계로 종료합니다.
       break;
     }
     calls++;
     if(!page.length)break;
 
     for(const r of page){
-      if(!badSet.has(r.timestamp) || repairedSet.has(r.timestamp))continue;
-      if(candleOhlcValid(r)){
+      if(!badSet.has(r.timestamp))continue;
+      alternateByTs.set(r.timestamp,{...r});
+      if(!repairedSet.has(r.timestamp)&&candleOhlcValid(r)){
         map.set(r.timestamp,r);
         repairedSet.add(r.timestamp);
         repaired++;
@@ -430,23 +456,39 @@ async function repairInvalidOhlc(symbol,g,interval,map,bounds){
     if(!Number.isFinite(oldest) || oldest>=previousOldest)break;
     previousOldest=oldest;
     cursor=oldest-1;
-
     const done=Math.min(1,calls/estimated);
     $("progress").value=Math.min(99,96+Math.round(done*3));
     if(calls===1 || calls%10===0 || calls>=estimated){
-      setText("status",`OHLC 이상봉 일괄 교차검증 중… API ${calls.toLocaleString()}/${estimated.toLocaleString()}페이지 내외\n대상 ${bad.length.toLocaleString()}봉 · 복구 ${repaired.toLocaleString()}봉 · 미복구 ${(bad.length-repaired).toLocaleString()}봉`);
-      // 렌더링 기회를 줘서 브라우저가 멈춘 것처럼 보이지 않게 합니다.
+      setText("status",`OHLC 이상봉 원본 교차검증 중… API ${calls.toLocaleString()}/${estimated.toLocaleString()}페이지 내외\n대상 ${bad.length.toLocaleString()}봉 · 정상 대체값 복구 ${repaired.toLocaleString()}봉 · V2 대응 ${alternateByTs.size.toLocaleString()}봉`);
       await sleep(0);
     }
     await sleep(requestDelayMs(g));
+  }
+
+  let alternateFound=0,identicalInvalid=0,differentInvalid=0,alternateMissing=0;
+  for(const ts of [...badSet].sort((a,b)=>a-b)){
+    const p=originalByTs.get(ts);
+    const a=alternateByTs.get(ts)||null;
+    if(a)alternateFound++; else alternateMissing++;
+    const pFlags=ohlcFlags(p),aFlags=ohlcFlags(a);
+    const identical=sameOhlc(p,a);
+    if(a&&!candleOhlcValid(a)){ if(identical)identicalInvalid++; else differentInvalid++; }
+    ohlcDiagnostics.push({
+      timestamp:ts,datetime_utc:iso(ts),
+      primary_source:p?._source||"primary",primary_open:p?.open,primary_high:p?.high,primary_low:p?.low,primary_close:p?.close,primary_flags:pFlags,
+      alternate_source:a?._source||"",alternate_open:a?.open??"",alternate_high:a?.high??"",alternate_low:a?.low??"",alternate_close:a?.close??"",alternate_flags:aFlags,
+      same_ohlc:identical?"YES":"NO",repaired:repairedSet.has(ts)?"YES":"NO"
+    });
   }
 
   const unresolved=[...badSet].filter(ts=>{
     const r=map.get(ts);
     return !r || !candleOhlcValid(r);
   }).length;
-  setText("status",`OHLC 이상봉 일괄 교차검증 완료: 대상 ${bad.length.toLocaleString()}봉 · 복구 ${repaired.toLocaleString()}봉 · 미복구 ${unresolved.toLocaleString()}봉\nAPI ${calls.toLocaleString()}페이지 확인`);
-  return {repaired,unresolved,calls};
+  $("diagDownloadBtn").disabled=ohlcDiagnostics.length===0;
+  setText("diagStatus",`OHLC 진단 준비 완료: 오류 원본 ${bad.length.toLocaleString()}봉 · 대체 endpoint 대응 ${alternateFound.toLocaleString()}봉\n양쪽 OHLC 완전 동일+오류 ${identicalInvalid.toLocaleString()}봉 · 값은 다르지만 대체값도 오류 ${differentInvalid.toLocaleString()}봉 · 대체 응답 없음 ${alternateMissing.toLocaleString()}봉\n진단 CSV를 다운로드하면 각 timestamp의 V3/V2 OHLC와 오류 유형을 확인할 수 있습니다.`,unresolved?"warn":"ok");
+  setText("status",`OHLC 이상봉 원본 교차검증 완료: 대상 ${bad.length.toLocaleString()}봉 · 정상 대체값 복구 ${repaired.toLocaleString()}봉 · 미복구 ${unresolved.toLocaleString()}봉\nAPI ${calls.toLocaleString()}페이지 확인`);
+  return {repaired,unresolved,calls,alternateFound,identicalInvalid,differentInvalid,alternateMissing};
 }
 async function repairMissing(symbol,g,interval,map,bounds,maxRounds=3){
   let repaired=0,attempted=0,unresolved=[];
@@ -581,7 +623,7 @@ async function collectOhlcv(){
       if(x.issues.ohlc)reasons.push(`OHLC 오류 ${x.issues.ohlc}봉`);
       if(x.issues.invalid)reasons.push(`숫자 오류 ${x.issues.invalid}봉`);
       if(x.issues.negativeVolume)reasons.push(`음수 거래량 ${x.issues.negativeVolume}봉`);
-      setText("status",`OHLCV 검증 미통과: ${reasons.join(" · ")||"보완 필요"}${apiFloorMs?`\nAPI 바닥/반복 감지: ${iso(apiFloorMs)}`:""}\nOHLC 오류가 남으면 아래 '과거 OHLCV CSV 보완'에서 같은 시간봉의 Bitget Futures Candlestick CSV를 추가한 뒤 재검증하세요.`,"warn");
+      setText("status",`OHLCV 검증 미통과: ${reasons.join(" · ")||"보완 필요"}${apiFloorMs?`\nAPI 바닥/반복 감지: ${iso(apiFloorMs)}`:""}\nOHLC 오류가 남으면 먼저 'OHLC 오류 진단 CSV 다운로드'로 V3/V2 원본을 비교하세요. 1m에 1D Candlestick 파일을 병합하면 안 됩니다.`,"warn");
     }
   }catch(e){
     setText("status",e.name==="AbortError"?"작업을 중지했습니다.":`수집 실패: ${e.message}`,"bad");
@@ -680,6 +722,20 @@ function downloadOhlcv(){
   for(const r of collected)lines.push([r.timestamp,iso(r.timestamp),r.open,r.high,r.low,r.close,r.volume_base,r.volume_quote].map(csvEscape).join(","));
   saveCsv(lines,`${collectedMeta.symbol}_${LABEL[collectedMeta.g]}_OHLCV_${displayDateForTimestamp(collected[0].timestamp,collectedMeta.g)}_${displayDateForTimestamp(collected.at(-1).timestamp,collectedMeta.g)}.csv`);
 }
+function downloadOhlcDiagnostics(){
+  if(!ohlcDiagnostics.length)return;
+  const h=["timestamp","datetime_utc","primary_source","primary_open","primary_high","primary_low","primary_close","primary_flags","alternate_source","alternate_open","alternate_high","alternate_low","alternate_close","alternate_flags","same_ohlc","repaired"];
+  const lines=[h.join(",")];
+  for(const r of ohlcDiagnostics)lines.push(h.map(k=>csvEscape(r[k])).join(","));
+  const symbol=cleanSymbol($("symbol").value),g=$("granularity").value;
+  saveCsv(lines,`${symbol}_${LABEL[g]}_OHLC_DIAGNOSTIC_${$("ohlcvStart").value}_${$("ohlcvEnd").value}.csv`);
+}
+function clearDiagnostics(){
+  ohlcDiagnostics=[];
+  $("diagDownloadBtn").disabled=true;
+  setText("diagStatus","OHLC 진단 결과를 초기화했습니다.","warn");
+}
+
 function clearOhlcv(preserveRange=false){
   candleMap=new Map();
   collected=[];
@@ -687,6 +743,9 @@ function clearOhlcv(preserveRange=false){
   if(!preserveRange){apiFloorMs=null;apiFloorConfirmed=false;}
   $("ohlcvReport").innerHTML="";
   $("ohlcvDownloadBtn").disabled=true;
+  ohlcDiagnostics=[];
+  $("diagDownloadBtn").disabled=true;
+  setText("diagStatus","","");
   setText("status","OHLCV 메모리를 초기화했습니다.","warn");
 }
 function resetForInputs(resetAvailability=false){
@@ -712,6 +771,8 @@ $("cancelBtn").addEventListener("click",()=>aborter?.abort());
 $("candleImportBtn").addEventListener("click",importCandleFiles);
 $("candleClearBtn").addEventListener("click",()=>{$("candleFiles").value="";setText("candleStatus","선택한 Candlestick 파일을 초기화했습니다.","warn");});
 $("ohlcvDownloadBtn").addEventListener("click",downloadOhlcv);
+$("diagDownloadBtn").addEventListener("click",downloadOhlcDiagnostics);
+$("diagClearBtn").addEventListener("click",clearDiagnostics);
 $("clearOhlcvBtn").addEventListener("click",clearOhlcv);
 
 updateDateLabels();
